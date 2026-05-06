@@ -1,6 +1,6 @@
 {
   "name": "@openacp/discord-adapter",
-  "version": "2026.506.1",
+  "version": "2026.506.2",
   "description": "Discord adapter plugin for OpenACP — forum threads, slash commands, streaming messages",
   "type": "module",
   "main": "dist/index.js",
