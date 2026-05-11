@@ -4,6 +4,7 @@ import {
   renderToolCard,
   renderUsageEmbed,
   renderPermissionEmbed,
+  splitMessage,
   splitToolCardDescription,
 } from "../formatting.js";
 import type { OutputMode, ToolDisplaySpec, ToolCardSnapshot } from "../formatting.js";
@@ -589,3 +590,114 @@ describe("renderPermissionEmbed", () => {
     expect((alwaysBtn as any).data.style).toBe(ButtonStyle.Secondary);
   });
 });
+
+// ─── splitMessage ───────────────────────────────────────────────────────────
+
+describe("splitMessage", () => {
+  it("returns a single chunk when input fits in maxLength", () => {
+    const text = "short message";
+    expect(splitMessage(text, 100)).toEqual([text]);
+  });
+
+  it("splits at paragraph boundaries when paragraphs fit individually", () => {
+    const a = "a".repeat(40);
+    const b = "b".repeat(40);
+    const c = "c".repeat(40);
+    const text = `${a}\n\n${b}\n\n${c}`; // 40+2+40+2+40 = 124 chars
+    const chunks = splitMessage(text, 90);
+    // Each chunk should contain whole paragraphs joined by \n\n where possible.
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    // Reassembling concatenates with \n\n between chunks (each chunk is one or
+    // more whole paragraphs). All three source paragraphs survive.
+    const reassembled = chunks.join("\n\n");
+    expect(reassembled).toContain(a);
+    expect(reassembled).toContain(b);
+    expect(reassembled).toContain(c);
+    // No chunk exceeds maxLength.
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(90);
+  });
+
+  // Regression test for a content-loss bug fixed in this PR. The previous
+  // implementation handled this exact shape (a short paragraph followed by an
+  // over-long paragraph) with:
+  //   if (candidate.length > maxLength && current) {
+  //     chunks.push(current);
+  //     current = para.length > maxLength ? para.slice(0, maxLength) : para;
+  //   }
+  // The `slice(0, maxLength)` silently dropped everything past maxLength of
+  // the long paragraph. Discovered live with buffer=2706 producing
+  // chunks=[63, 1904] — 739 chars lost.
+  //
+  // The fix flushes `current`, then routes the over-long paragraph through
+  // line-splitting (and lines through char-splitting as a last resort).
+  it("preserves every character when a small paragraph precedes a long one", () => {
+    const intro = "intro";
+    // 6 lines × ~190 chars = ~1140 chars, one paragraph, no internal \n\n.
+    const longLines = Array.from({ length: 6 }, (_, i) => `line ${i}: ${"x".repeat(180)}`);
+    const longPara = longLines.join("\n");
+    const text = `${intro}\n\n${longPara}`;
+    expect(longPara.length).toBeGreaterThan(500);
+
+    const chunks = splitMessage(text, 500);
+    // The intro must survive.
+    expect(chunks.some((c) => c.includes(intro))).toBe(true);
+    // Every line of the long paragraph must survive — the old code dropped
+    // chars from index 500 onward of `longPara`.
+    for (const line of longLines) {
+      expect(chunks.some((c) => c.includes(line))).toBe(true);
+    }
+    // No chunk exceeds maxLength.
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(500);
+  });
+
+  it("hard-splits a single line that exceeds maxLength so nothing is lost", () => {
+    // One line, no newlines, way over the limit.
+    const text = "z".repeat(1500);
+    const chunks = splitMessage(text, 500);
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(500);
+    // Every byte still accounted for.
+    expect(chunks.join("").length).toBe(1500);
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("balances unclosed code fences across chunk boundaries", () => {
+    // A long fenced block that has to span multiple chunks.
+    const inside = Array.from({ length: 40 }, (_, i) => `row-${i}: ${"x".repeat(40)}`).join("\n");
+    const text = "```text\n" + inside + "\n```";
+    const chunks = splitMessage(text, 500);
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    // First chunk opens a fence and must close it.
+    expect(chunks[0].startsWith("```text")).toBe(true);
+    expect(chunks[0].trimEnd().endsWith("```")).toBe(true);
+    // Subsequent chunks re-open with the same tag, and the last chunk
+    // contains the original closing fence.
+    for (let i = 1; i < chunks.length; i++) {
+      expect(chunks[i].startsWith("```text")).toBe(true);
+    }
+    expect(chunks[chunks.length - 1].trimEnd().endsWith("```")).toBe(true);
+    // No chunk has an unbalanced number of fence boundaries (each chunk
+    // should have an even number of ``` lines after balancing).
+    for (const chunk of chunks) {
+      const fenceCount = (chunk.match(/^```[a-zA-Z0-9_-]*/gm) ?? []).length;
+      expect(fenceCount % 2).toBe(0);
+    }
+  });
+
+  it("handles a mix of small paragraphs and one paragraph over the limit", () => {
+    const intro = "Here is some intro text.";
+    const longLines = Array.from({ length: 8 }, (_, i) => `data line ${i}: ${"y".repeat(80)}`);
+    const longPara = longLines.join("\n");
+    const outro = "And a short outro.";
+    const text = `${intro}\n\n${longPara}\n\n${outro}`;
+
+    const chunks = splitMessage(text, 400);
+    // No truncation of any kind.
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(400);
+    const all = chunks.join("\n");
+    expect(all).toContain(intro);
+    for (const line of longLines) expect(all).toContain(line);
+    expect(all).toContain(outro);
+  });
+});
+
