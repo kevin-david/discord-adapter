@@ -728,5 +728,27 @@ describe("splitMessage", () => {
     const firstLine = codeChunk!.split("\n")[0];
     expect(firstLine).toBe("```python");
   });
+
+  // An untagged ``` fence (no language hint) wrapping a long block — split
+  // across chunks must reopen with ``` on the continuation chunk so the rest
+  // of the content stays inside the fenced block. Previously, untagged carry-
+  // over was suppressed (to avoid the "extra closer corrupts language tag"
+  // case above), which broke this legitimate scenario.
+  it("re-opens an untagged ``` fence across chunk boundaries", () => {
+    const rows = Array.from({ length: 30 }, (_, i) => `| col1-${i} | col2-${i} | col3-${i} |`);
+    const text = "```\n" + rows.join("\n") + "\n```";
+    const chunks = splitMessage(text, 500);
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    // Every continuation chunk must reopen with ``` so content stays fenced.
+    for (let i = 1; i < chunks.length; i++) {
+      const firstLine = chunks[i].split("\n")[0];
+      expect(firstLine).toBe("```");
+    }
+    // No chunk should leave a row unwrapped — the second chunk shouldn't
+    // start with the literal pipe content.
+    for (let i = 1; i < chunks.length; i++) {
+      expect(chunks[i].startsWith("|")).toBe(false);
+    }
+  });
 });
 
