@@ -859,7 +859,12 @@ export class DiscordAdapter extends MessagingAdapter {
     });
 
     try {
-      await super.sendMessage(sessionId, content);
+      // Resolve verbosity from discord plugin settings (and per-session override)
+      // rather than the base class's channel-config lookup, which doesn't see our
+      // plugin-settings-backed outputMode and would always fall back to "medium".
+      const verbosity = this.resolveMode(sessionId);
+      if (!this.shouldDisplay(content, verbosity)) return;
+      await this.dispatchMessage(sessionId, content, verbosity);
     } finally {
       this._sessionContexts.delete(sessionId);
     }
@@ -935,9 +940,21 @@ export class DiscordAdapter extends MessagingAdapter {
     await tracker.onPlan(entries);
   }
 
-  protected async handleUsage(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
+  protected async handleUsage(sessionId: string, content: OutgoingMessage, verbosity: DisplayVerbosity): Promise<void> {
     const { thread, isAssistant } = this.getSessionContext(sessionId);
     await this.draftManager.finalize(sessionId, thread, isAssistant);
+
+    // Per-mode display rules:
+    //   low    — usage events are filtered upstream by HIDDEN_ON_LOW; this
+    //             handler isn't called at low (so the in-flight text draft does
+    //             not get finalized via this path; that's a pre-existing bug
+    //             that low users can hit. Out of scope here.)
+    //   medium — handler runs, draft is finalized, but no embed or Task-completed
+    //   high   — full receipts: usage embed + Task-completed cross-channel ping
+    // Usage embeds and the Task-completed ping are noisy at the default tier;
+    // they're now an opt-in via 'high' for users who explicitly want metrics.
+    if (verbosity !== "high") return;
+
     const meta = content.metadata as { tokensUsed?: number; contextSize?: number; cost?: number; duration?: number } | undefined;
     const mode = this.resolveMode(sessionId);
 
@@ -952,7 +969,6 @@ export class DiscordAdapter extends MessagingAdapter {
       log.warn({ err, sessionId }, "Failed to send usage embed");
     }
 
-    // Notify notification channel
     if (this.notificationChannel && sessionId !== this.assistantSession?.id) {
       const sess = this.core.sessionManager.getSession(sessionId);
       const name = sess?.name || "Session";
