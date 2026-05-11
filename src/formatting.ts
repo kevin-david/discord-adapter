@@ -560,23 +560,31 @@ function splitMessageImpl(text: string, maxLength: number): string[] {
 }
 
 /**
- * Close any open ``` fence at the end of each chunk and re-open it (with the
- * same language tag) at the start of the next. Without this, a long fenced
- * block (e.g. an ASCII table) split across multiple Discord messages renders
- * with the second message as raw text and the unclosed first message as code.
+ * Close any open ``` fence at the end of each chunk and re-open it at the
+ * start of the next (with the same language tag if any). Without this, a long
+ * fenced block split across Discord messages renders with the continuation
+ * as raw text.
  *
- * Implementation: walk the fences in order, tracking which fence (if any) is
- * currently open. Whatever's open at the end of a chunk is what needs to be
- * re-opened in the next chunk — and only if it's TAGGED. Naively grabbing the
- * "last fence" misidentifies a closing ``` as an opening one when a chunk
- * has [open, close, close] (e.g. a balanced block plus a stray closer).
+ * Implementation: walk fences in order, tracking which fence (if any) is
+ * currently open via state machine. Whatever's open at the end of a chunk
+ * is what needs to be re-opened in the next chunk — with one nuance for
+ * untagged fences:
+ *
+ *   - TAGGED open (e.g. ```python) at chunk end: always carry forward.
+ *     Losing a language tag across a split is the worst-case outcome.
+ *
+ *   - UNTAGGED open (bare ```) at chunk end: carry forward ONLY if the chunk
+ *     has content after the trailing fence. A bare ``` as the last non-blank
+ *     line is more likely an LLM emitting a dangling/orphan close (after a
+ *     balanced block) than the start of a new code block. Carrying that
+ *     untagged fence into the next chunk would corrupt any later language
+ *     tag (e.g. prepending ``` in front of a ```python that should stay).
  */
 function balanceCodeFences(chunks: string[]): string[] {
   // Triple-backtick at start of a line, optionally followed by a language tag.
   const FENCE_RE = /^```[a-zA-Z0-9_-]*/gm;
-  // Only TAGGED opens are worth carrying forward — re-opening with an untagged
-  // ``` doesn't preserve any information the user couldn't infer.
-  const isTaggedOpen = (fence: string): boolean => fence.length > 3;
+  // Anchored variant for "this whole line is a fence" check.
+  const FENCE_LINE_RE = /^```[a-zA-Z0-9_-]*$/;
 
   const result: string[] = [];
   let pendingOpenFence: string | null = null;
@@ -594,11 +602,23 @@ function balanceCodeFences(chunks: string[]): string[] {
     }
 
     if (openFence !== null) {
-      // Close it here so the chunk renders as a self-contained block.
+      // Decide whether to carry forward BEFORE we mutate the chunk.
+      let shouldCarry: boolean;
+      if (openFence.length > 3) {
+        // Tagged open — always carry forward.
+        shouldCarry = true;
+      } else {
+        // Untagged open — only carry if there's content after the trailing
+        // fence (i.e., the chunk genuinely splits a fenced block mid-content).
+        const lines = chunk.split("\n");
+        let i = lines.length - 1;
+        while (i >= 0 && lines[i].trim() === "") i--;
+        shouldCarry = i >= 0 && !FENCE_LINE_RE.test(lines[i]);
+      }
+
+      // Close the chunk so it renders as a self-contained block either way.
       chunk = `${chunk}\n\`\`\``;
-      // Carry forward only if tagged — an untagged carry-over is no
-      // improvement (and would corrupt the visual code-block style).
-      if (isTaggedOpen(openFence)) pendingOpenFence = openFence;
+      if (shouldCarry) pendingOpenFence = openFence;
     }
 
     result.push(chunk);
