@@ -564,25 +564,41 @@ function splitMessageImpl(text: string, maxLength: number): string[] {
  * same language tag) at the start of the next. Without this, a long fenced
  * block (e.g. an ASCII table) split across multiple Discord messages renders
  * with the second message as raw text and the unclosed first message as code.
+ *
+ * Implementation: walk the fences in order, tracking which fence (if any) is
+ * currently open. Whatever's open at the end of a chunk is what needs to be
+ * re-opened in the next chunk — and only if it's TAGGED. Naively grabbing the
+ * "last fence" misidentifies a closing ``` as an opening one when a chunk
+ * has [open, close, close] (e.g. a balanced block plus a stray closer).
  */
 function balanceCodeFences(chunks: string[]): string[] {
+  // Triple-backtick at start of a line, optionally followed by a language tag.
+  const FENCE_RE = /^```[a-zA-Z0-9_-]*/gm;
+  // Only TAGGED opens are worth carrying forward — re-opening with an untagged
+  // ``` doesn't preserve any information the user couldn't infer.
+  const isTaggedOpen = (fence: string): boolean => fence.length > 3;
+
   const result: string[] = [];
   let pendingOpenFence: string | null = null;
 
   for (let chunk of chunks) {
-    if (pendingOpenFence) {
+    if (pendingOpenFence !== null) {
       chunk = `${pendingOpenFence}\n${chunk}`;
       pendingOpenFence = null;
     }
 
-    // Match ``` at start of a line, optionally followed by a language tag.
-    // Triple-backticks mid-line aren't valid fences; ignore them.
-    const fences = chunk.match(/^```[a-zA-Z0-9_-]*/gm) ?? [];
-    if (fences.length % 2 === 1) {
-      // Odd count → final fence in this chunk is opening, not closed.
-      // Close it here, re-open with the same tag at the next chunk.
-      pendingOpenFence = fences[fences.length - 1];
+    // Walk fences in order, toggling the currently-open fence.
+    let openFence: string | null = null;
+    for (const fence of chunk.match(FENCE_RE) ?? []) {
+      openFence = openFence === null ? fence : null;
+    }
+
+    if (openFence !== null) {
+      // Close it here so the chunk renders as a self-contained block.
       chunk = `${chunk}\n\`\`\``;
+      // Carry forward only if tagged — an untagged carry-over is no
+      // improvement (and would corrupt the visual code-block style).
+      if (isTaggedOpen(openFence)) pendingOpenFence = openFence;
     }
 
     result.push(chunk);

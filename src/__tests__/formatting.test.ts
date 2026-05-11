@@ -699,5 +699,34 @@ describe("splitMessage", () => {
     for (const line of longLines) expect(all).toContain(line);
     expect(all).toContain(outro);
   });
+
+  // Regression test for a code-fence balancing edge case raised in #11 review.
+  // balanceCodeFences treats fences as a sequence and (in the buggy version)
+  // sets pendingOpenFence to `fences[fences.length - 1]`. When a chunk has odd
+  // fence count but the LAST fence is an untagged closing ``` (e.g., a fence
+  // sequence of [open, close, close]), the next chunk gets an untagged ```
+  // prepended instead of the original language tag.
+  //
+  // Trigger: input with a balanced fence followed by an extra ``` (malformed
+  // by intent, but LLMs do emit this), then a separate tagged fence. The
+  // middle chunk's fences = [python, close, close]; the bug propagates the
+  // last close as if it were an open, stripping the language tag from the
+  // next chunk's reopening.
+  it("propagates the LANGUAGE TAG (not bare ```) when an extra closing fence appears in a prior chunk", () => {
+    const text = [
+      "This is plain text.",
+      "```python\nA\n```\nB\n```", // balanced block + orphan close
+      "```python\nmore code\n```",
+    ].join("\n\n");
+    const chunks = splitMessage(text, 30);
+    // The chunk carrying "more code" must reopen with `\`\`\`python`, not
+    // a bare untagged `\`\`\`` that lost the language. (The Discord render
+    // for an untagged fence still works, but the bug would silently swallow
+    // the language tag across all subsequent chunks.)
+    const codeChunk = chunks.find((c) => c.includes("more code"));
+    expect(codeChunk).toBeDefined();
+    const firstLine = codeChunk!.split("\n")[0];
+    expect(firstLine).toBe("```python");
+  });
 });
 
