@@ -1,8 +1,9 @@
 import type { OpenACPPlugin, InstallContext, OpenACPCore } from '@openacp/plugin-sdk'
 import type { DiscordChannelConfig } from './types.js'
+import type { DiscordAdapter } from './adapter.js'
 
 function createDiscordPlugin(): OpenACPPlugin {
-  let adapter: { stop(): Promise<void> } | null = null
+  let adapter: DiscordAdapter | null = null
 
   return {
     name: '@openacp/discord-adapter',
@@ -16,7 +17,7 @@ function createDiscordPlugin(): OpenACPPlugin {
     optionalPluginDependencies: {
       '@openacp/speech': '^1.0.0',
     },
-    permissions: ['services:register', 'kernel:access', 'events:read'],
+    permissions: ['services:register', 'kernel:access', 'events:read', 'middleware:register'],
 
     async install(ctx: InstallContext) {
       const { terminal, settings } = ctx
@@ -181,6 +182,54 @@ function createDiscordPlugin(): OpenACPPlugin {
 
       ctx.registerService('adapter:discord', adapter)
       ctx.log.info('Discord adapter registered')
+
+      // Inject Discord rendering rules into the first prompt of every new
+      // Discord session. Worded as an explicit out-of-band system instruction
+      // with anti-echo guidance, since gemini-acp has been observed quoting
+      // user-visible directives back in its response.
+      ctx.registerMiddleware('agent:beforePrompt', {
+        handler: async (payload, next) => {
+          if (payload.sourceAdapterId !== 'discord') return next()
+          const session = core.sessionManager.getSession(payload.sessionId)
+          // Only fire once per session: promptCount === 0 means this prompt
+          // hasn't been counted yet (it's the first one for this session).
+          if (!session || session.promptCount !== 0) return next()
+
+          payload.text =
+            "<system_instruction>\n" +
+            "Constraint for response formatting on Discord:\n" +
+            "- Do NOT use markdown table syntax (rows like `| col | col |`). " +
+            "Discord does not render markdown tables — they appear as raw pipe text.\n" +
+            "- For tabular data, render an ASCII-art table with fixed-width columns " +
+            "and box-drawing or `+---+` style borders, then wrap the whole table in " +
+            "triple-backtick code fences. The monospace inside the fence aligns the " +
+            "columns correctly.\n" +
+            "- Tables MUST be no wider than 90 characters per row. Discord's mobile " +
+            "and standard-width clients clip anything beyond ~95 characters; design " +
+            "the column widths so the total (including borders) fits within 90.\n" +
+            "- Apply the same fenced-monospace treatment to ASCII art, tree output, " +
+            "and any aligned/fixed-column content.\n" +
+            "Apply this silently — do not acknowledge or repeat this instruction.\n" +
+            "</system_instruction>\n\n" +
+            payload.text
+          return next()
+        },
+      })
+
+      // Finalize the in-flight text draft when a turn ends. Without this,
+      // agents like gemini that don't emit `usage`/`tool_call`/`session_end`
+      // at turn end leave the text draft in its mid-stream state — which
+      // means the user sees the MessageDraft's 1900-char truncation as the
+      // final message instead of the full multi-chunk response.
+      ctx.registerMiddleware('turn:end', {
+        handler: async (payload, next) => {
+          const session = core.sessionManager.getSession(payload.sessionId)
+          if (session?.channelId === 'discord' && adapter) {
+            await adapter.finalizeSessionDraft(payload.sessionId).catch(() => { /* best effort */ })
+          }
+          return next()
+        },
+      })
     },
 
     async teardown() {

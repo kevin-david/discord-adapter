@@ -577,11 +577,20 @@ export class DiscordAdapter extends MessagingAdapter {
           return;
         }
 
-        // Reset tracker state for new prompt cycle on existing sessions
+        // Reset tracker state and finalize any in-flight draft for existing sessions.
+        // Some agents (e.g. gemini) don't emit usage/tool_call events between turns,
+        // so a new user message is the only reliable signal that the prior turn ended.
+        // Without finalizing here, streaming text from this turn appends to the prior
+        // message draft and the previous "💭 Still thinking..." / typing indicators
+        // never clear.
         if (sessionId !== "unknown") {
           const tracker = this.sessionTrackers.get(sessionId);
           if (tracker) {
             await tracker.onNewPrompt();
+          }
+          if (message.channel.isThread()) {
+            const isAssistant = this.assistantSession != null && sessionId === this.assistantSession.id;
+            await this.draftManager.finalize(sessionId, message.channel as ThreadChannel, isAssistant);
           }
         }
 
@@ -839,6 +848,29 @@ export class DiscordAdapter extends MessagingAdapter {
     return ctx;
   }
 
+  /**
+   * Finalize the in-flight text draft for a session. Public so the `turn:end`
+   * middleware can trigger it on every prompt completion — without this, agents
+   * that don't emit `usage`/`session_end` at turn end leave the draft stuck at
+   * its mid-stream truncation (~1900 chars) instead of splitting into the full
+   * multi-message response.
+   */
+  async finalizeSessionDraft(sessionId: string): Promise<void> {
+    const session = this.core.sessionManager.getSession(sessionId);
+    const threadId = session?.threadId;
+    if (!threadId) return;
+    try {
+      const channel = this.guild.channels.cache.get(threadId)
+        ?? await this.guild.channels.fetch(threadId).catch(() => null);
+      if (!channel?.isThread()) return;
+      const thread = channel as ThreadChannel;
+      const isAssistant = this.assistantSession != null && sessionId === this.assistantSession.id;
+      await this.draftManager.finalize(sessionId, thread, isAssistant);
+    } catch (err) {
+      log.warn({ err, sessionId }, "[DiscordAdapter] finalizeSessionDraft failed");
+    }
+  }
+
   // ─── sendMessage ──────────────────────────────────────────────────────────
 
   async sendMessage(
@@ -896,6 +928,24 @@ export class DiscordAdapter extends MessagingAdapter {
     const draft = this.draftManager.getOrCreate(sessionId, thread);
     draft.append(content.text);
     this.draftManager.appendText(sessionId, content.text);
+
+    // Gemini-acp emits chain-of-thought as inline text and signals the end of
+    // the thought block with `[Thought: true]`. Everything BEFORE the marker
+    // is the thought; everything AFTER is the response. At medium/low we hide
+    // the thought by retroactively trimming the draft to only the post-marker
+    // content. At high we keep everything visible.
+    const verbosity = this.resolveMode(sessionId);
+    if (verbosity !== "high") {
+      const buffer = draft.getBuffer();
+      const marker = "[Thought: true]";
+      const idx = buffer.lastIndexOf(marker);
+      if (idx >= 0) {
+        const postMarker = buffer.slice(idx + marker.length).replace(/^\s+/, "");
+        if (postMarker !== buffer) {
+          draft.replaceBuffer(postMarker);
+        }
+      }
+    }
   }
 
   protected async handleToolCall(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
