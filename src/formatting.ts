@@ -507,33 +507,88 @@ function formatHighDetailsLegacy(
 
 function splitMessageImpl(text: string, maxLength: number): string[] {
   if (text.length <= maxLength) return [text];
-  // Split at paragraph boundaries first, then lines
+  // Split at paragraph boundaries first; for paragraphs that are individually
+  // too long, fall back to line-splitting; for single lines that are too long,
+  // fall back to hard-character splitting. All content must reach a chunk —
+  // never truncate-and-drop.
   const paragraphs = text.split("\n\n");
   const chunks: string[] = [];
   let current = "";
-  for (const para of paragraphs) {
-    const candidate = current ? `${current}\n\n${para}` : para;
-    if (candidate.length > maxLength && current) {
-      chunks.push(current);
-      current = para.length > maxLength ? para.slice(0, maxLength) : para;
-    } else if (candidate.length > maxLength) {
-      // Single paragraph too long, split at line boundaries
-      const lines = para.split("\n");
-      for (const line of lines) {
-        const lineCandidate = current ? `${current}\n${line}` : line;
-        if (lineCandidate.length > maxLength && current) {
-          chunks.push(current);
-          current = line;
-        } else {
-          current = lineCandidate;
+  const flush = () => {
+    if (current) { chunks.push(current); current = ""; }
+  };
+
+  const pushLines = (para: string) => {
+    const lines = para.split("\n");
+    for (const line of lines) {
+      if (line.length > maxLength) {
+        // Single line too long — hard split by characters so nothing is lost.
+        flush();
+        for (let i = 0; i < line.length; i += maxLength) {
+          chunks.push(line.slice(i, i + maxLength));
         }
+        continue;
       }
+      const lineCandidate = current ? `${current}\n${line}` : line;
+      if (lineCandidate.length > maxLength) {
+        flush();
+        current = line;
+      } else {
+        current = lineCandidate;
+      }
+    }
+  };
+
+  for (const para of paragraphs) {
+    if (para.length > maxLength) {
+      // Paragraph alone exceeds the limit — flush whatever we've buffered
+      // and split this paragraph by lines so the full content survives.
+      flush();
+      pushLines(para);
+      continue;
+    }
+    const candidate = current ? `${current}\n\n${para}` : para;
+    if (candidate.length > maxLength) {
+      flush();
+      current = para;
     } else {
       current = candidate;
     }
   }
-  if (current) chunks.push(current);
-  return chunks;
+  flush();
+  return balanceCodeFences(chunks);
+}
+
+/**
+ * Close any open ``` fence at the end of each chunk and re-open it (with the
+ * same language tag) at the start of the next. Without this, a long fenced
+ * block (e.g. an ASCII table) split across multiple Discord messages renders
+ * with the second message as raw text and the unclosed first message as code.
+ */
+function balanceCodeFences(chunks: string[]): string[] {
+  const result: string[] = [];
+  let pendingOpenFence: string | null = null;
+
+  for (let chunk of chunks) {
+    if (pendingOpenFence) {
+      chunk = `${pendingOpenFence}\n${chunk}`;
+      pendingOpenFence = null;
+    }
+
+    // Match ``` at start of a line, optionally followed by a language tag.
+    // Triple-backticks mid-line aren't valid fences; ignore them.
+    const fences = chunk.match(/^```[a-zA-Z0-9_-]*/gm) ?? [];
+    if (fences.length % 2 === 1) {
+      // Odd count → final fence in this chunk is opening, not closed.
+      // Close it here, re-open with the same tag at the next chunk.
+      pendingOpenFence = fences[fences.length - 1];
+      chunk = `${chunk}\n\`\`\``;
+    }
+
+    result.push(chunk);
+  }
+
+  return result;
 }
 
 /** @deprecated Use renderToolCard instead */
