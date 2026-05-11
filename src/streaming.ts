@@ -26,6 +26,17 @@ export class MessageDraft {
     this.scheduleFlush()
   }
 
+  /**
+   * Replace the entire buffered content. Used when something upstream
+   * (e.g. detecting an end-of-thought marker mid-stream) needs to retroactively
+   * trim already-appended content. Triggers a flush so the existing Discord
+   * message updates to match.
+   */
+  replaceBuffer(text: string): void {
+    this.buffer = text
+    this.scheduleFlush()
+  }
+
   getBuffer(): string {
     return this.buffer
   }
