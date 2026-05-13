@@ -250,10 +250,28 @@ function applyUpdate(entry: ToolEntry, update: PendingUpdate): void {
   if (update.diffStats !== undefined) entry.diffStats = update.diffStats;
 }
 
-// Gemini-acp internal bookkeeping tools — hidden at low/medium, shown with
-// 👁️ at high. Exact lowercase names so we don't accidentally match a future
-// tool like "create_topic" or "get_forum_topic".
-const GEMINI_NOISE_TOOLS = new Set(["update topic context", "invoke subagent"]);
+// Gemini-acp internal bookkeeping tool titles — hidden at low/medium, shown
+// with 👁️ at high.
+//
+// Gemini emits tool titles via two paths:
+//   1. Live (in-progress) events use the invocation's getDescription(),
+//      producing dynamic strings like:
+//        - 'Update topic to: "<title>"'
+//        - 'Update tactical intent: "<intent>"'
+//   2. Replayed (completed/historical) events use the tool's static
+//      displayName, producing exact strings like:
+//        - "Update Topic Context"
+//        - "Invoke Subagent"
+//
+// The exact set covers the replay path. The prefixes anchor on the literal
+// `: "` that the dynamic format always emits, so they can't accidentally
+// match a future tool named (e.g.) "Update topic permissions".
+//
+// Live subagent invocations emit "Invoke <agent-name>" with a user-
+// configurable suffix; we can't safely match those without enumerating
+// every subagent name, so they fall through and stay visible.
+const GEMINI_NOISE_EXACT = new Set(["update topic context", "invoke subagent"]);
+const GEMINI_NOISE_PREFIXES = ['update topic to: "', 'update tactical intent: "'];
 
 /** Simple noise evaluation — noise tools are hidden in low/medium modes */
 function evaluateNoise(name: string, _kind: string, _rawInput: unknown): boolean {
@@ -261,7 +279,8 @@ function evaluateNoise(name: string, _kind: string, _rawInput: unknown): boolean
   // Claude: TodoRead/TodoWrite, ToolResult with no content
   if (lower.includes("todo")) return true;
   if (lower === "toolresult") return true;
-  if (GEMINI_NOISE_TOOLS.has(lower)) return true;
+  if (GEMINI_NOISE_EXACT.has(lower)) return true;
+  if (GEMINI_NOISE_PREFIXES.some((p) => lower.startsWith(p))) return true;
   return false;
 }
 
