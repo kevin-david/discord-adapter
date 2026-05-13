@@ -250,16 +250,18 @@ function applyUpdate(entry: ToolEntry, update: PendingUpdate): void {
   if (update.diffStats !== undefined) entry.diffStats = update.diffStats;
 }
 
+// Gemini-acp internal bookkeeping tools — hidden at low/medium, shown with
+// 👁️ at high. Exact lowercase names so we don't accidentally match a future
+// tool like "create_topic" or "get_forum_topic".
+const GEMINI_NOISE_TOOLS = new Set(["update topic context", "invoke subagent"]);
+
 /** Simple noise evaluation — noise tools are hidden in low/medium modes */
 function evaluateNoise(name: string, _kind: string, _rawInput: unknown): boolean {
   const lower = name.toLowerCase();
   // Claude: TodoRead/TodoWrite, ToolResult with no content
   if (lower.includes("todo")) return true;
   if (lower === "toolresult") return true;
-  // Gemini-acp: internal bookkeeping not worth surfacing at low/medium.
-  // (Still shown with 👁️ icon at high verbosity.)
-  if (lower.includes("topic")) return true; // Update Topic Context
-  if (lower.includes("subagent")) return true; // Invoke Subagent
+  if (GEMINI_NOISE_TOOLS.has(lower)) return true;
   return false;
 }
 
@@ -351,6 +353,8 @@ function buildTitle(entry: ToolEntry, kind: string): string {
     if (entry.name && /^[A-Za-z][A-Za-z0-9_-]{0,19}$/.test(entry.name)) {
       return entry.name.toLowerCase();
     }
+    const description = typeof input.description === "string" ? input.description : null;
+    if (description) return description;
   }
 
   if (kind === "read") {
@@ -376,11 +380,6 @@ function buildTitle(entry: ToolEntry, kind: string): string {
           ? input.path
           : null;
     if (filePath) return filePath;
-  }
-
-  if (EXECUTE_KINDS.has(kind)) {
-    const description = typeof input.description === "string" ? input.description : null;
-    if (description) return description;
   }
 
   if (kind === "agent") {
@@ -792,10 +791,11 @@ export class ActivityTracker {
     // Some agents (gemini) re-emit prior tool_call events on every agentic
     // step — without this guard, each step appears as a fresh Discord message
     // containing every tool call from the entire turn so far. If we've already
-    // recorded this tool ID in the previous card, route the (re-)emission
-    // there instead of letting it duplicate into the current card.
-    if (this.previousToolStateMap?.get(meta.id)) {
-      const prevEntry = this.previousToolStateMap.upsert(meta, kind, rawInput);
+    // recorded this tool ID in the previous card, drop the re-emission: any
+    // status/content already applied via onToolUpdate is the source of truth,
+    // and upserting would clobber it back to "running".
+    const prevEntry = this.previousToolStateMap?.get(meta.id);
+    if (prevEntry) {
       if (this.previousToolCard) {
         const spec = this.specBuilder.buildToolSpec(prevEntry, this._outputMode, this.sessionContext);
         this.previousToolCard.updateFromSpec(spec);

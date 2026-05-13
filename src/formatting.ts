@@ -142,10 +142,6 @@ const CODEY_KINDS = new Set([
   "read", "edit", "write", "delete", "search",
 ]);
 
-function isCodeyKind(kind: string): boolean {
-  return CODEY_KINDS.has(kind);
-}
-
 // ─── renderSpecSection ──────────────────────────────────────────────────────
 
 export function renderSpecSection(spec: ToolDisplaySpec, mode: OutputMode): string {
@@ -166,7 +162,7 @@ export function renderSpecSection(spec: ToolDisplaySpec, mode: OutputMode): stri
   // shell commands — render as inline `code` (monospace, no markdown
   // interpretation). Tools whose title is a descriptive label ("Update Topic
   // Context", "Invoke Subagent") stay bold.
-  const titleText = isCodeyKind(spec.kind) ? `\`${spec.title}\`` : `**${spec.title}**`;
+  const titleText = CODEY_KINDS.has(spec.kind) ? `\`${spec.title}\`` : `**${spec.title}**`;
   const titleLine = `${leadIcon} ${kindIcon} ${titleText}`;
   lines.push(titleLine);
 

@@ -76,11 +76,11 @@ describe("renderSpecSection", () => {
   });
 
   describe("medium mode", () => {
-    it("shows status icon, kind icon, bold title", () => {
+    it("shows status icon, kind icon, monospace title for codey kinds", () => {
       const result = renderSpecSection(makeSpec({ title: "config.ts" }), "medium");
       expect(result).toContain("✅");
       expect(result).toContain("📖");
-      expect(result).toContain("**config.ts**");
+      expect(result).toContain("`config.ts`");
     });
 
     it("shows description on second line with vine character", () => {
@@ -143,7 +143,7 @@ describe("renderSpecSection", () => {
       );
       expect(result).toContain("✅");
       expect(result).toContain("📖");
-      expect(result).toContain("**main.ts**");
+      expect(result).toContain("`main.ts`");
       expect(result).toContain("desc");
     });
 
