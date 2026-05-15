@@ -674,6 +674,7 @@ export class ActivityTracker {
 
   // Typing indicator state
   private typingDismissed = false;
+  private typingActive = false;
   private typingRefreshTimer?: ReturnType<typeof setInterval>;
 
   // Flush promise chain per card
@@ -977,11 +978,8 @@ export class ActivityTracker {
   }
 
   private async startTyping(): Promise<void> {
-    if (this.typingDismissed) return;
-    // Skip if already active — onThought fires on every chunk, so without this
-    // guard each thought event would trigger a separate sendTyping() call and
-    // quickly exhaust Discord's rate limit on /channels/:id/typing.
-    if (this.typingRefreshTimer) return;
+    if (this.typingDismissed || this.typingActive) return;
+    this.typingActive = true;
 
     try {
       await this.channel.sendTyping();
@@ -990,7 +988,10 @@ export class ActivityTracker {
     }
 
     // Re-check after the async call in case typing was stopped while awaiting
-    if (this.typingDismissed) return;
+    if (this.typingDismissed) {
+      this.typingActive = false;
+      return;
+    }
 
     this.typingRefreshTimer = setInterval(() => {
       if (this.typingDismissed) {
@@ -1011,5 +1012,6 @@ export class ActivityTracker {
       clearInterval(this.typingRefreshTimer);
       this.typingRefreshTimer = undefined;
     }
+    this.typingActive = false;
   }
 }

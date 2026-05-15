@@ -91,6 +91,31 @@ describe("ActivityTracker", () => {
 
       await tracker.cleanup();
     });
+
+    it("handles rapid concurrent onThought calls without spawning multiple timers", async () => {
+      const { tracker, channel } = createTracker();
+
+      // Mock sendTyping to be slightly slow (awaits a microtask)
+      (channel.sendTyping as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        await Promise.resolve();
+      });
+
+      // Fire multiple synchronous calls
+      await Promise.all([
+        tracker.onThought("a"),
+        tracker.onThought("b"),
+        tracker.onThought("c"),
+      ]);
+
+      // Before the fix, this would have triggered 3 sendTyping calls and 3 intervals
+      expect(channel.sendTyping).toHaveBeenCalledTimes(1);
+
+      // Fast forward and check that only ONE refresh happened
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(channel.sendTyping).toHaveBeenCalledTimes(2);
+
+      await tracker.cleanup();
+    });
   });
 
   describe("onToolCall", () => {
@@ -99,6 +124,7 @@ describe("ActivityTracker", () => {
 
       await tracker.onThought("thinking...");
       expect(channel.sendTyping).toHaveBeenCalled();
+      (channel.send as ReturnType<typeof vi.fn>).mockClear();
 
       await tracker.onToolCall(makeMeta(), "read", { file_path: "main.ts" });
 

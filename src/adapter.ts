@@ -84,6 +84,7 @@ export class DiscordAdapter extends MessagingAdapter {
 
   // Per-session thread context for concurrency safety in sendMessage handlers
   private _sessionContexts = new Map<string, { thread: ThreadChannel; isAssistant: boolean }>();
+  private _dispatchQueues = new Map<string, Promise<void>>();
   private _configChangedHandler?: (data: { sessionId: string }) => void;
   private _threadReadyHandler?: (data: { sessionId: string; channelId: string; threadId: string }) => void;
 
@@ -518,10 +519,16 @@ export class DiscordAdapter extends MessagingAdapter {
         // Ignore messages with no text and no attachments
         if (!text && message.attachments.size === 0) return;
 
-        // Resolve sessionId for file storage (fallback to "unknown" for new sessions)
-        const sessionId =
-          this.core.sessionManager.getSessionByThread("discord", threadId)
-            ?.id ?? "unknown";
+        // Resolve sessionId for file storage (fallback to "unknown" for new sessions).
+        // Includes stored records to support lazy resume state management.
+        let resolvedSessionId = this.core.sessionManager.getSessionByThread("discord", threadId)?.id;
+        if (!resolvedSessionId) {
+          const record = this.core.sessionManager.getRecordByThread("discord", threadId);
+          if (record && record.status !== "cancelled" && record.status !== "error") {
+            resolvedSessionId = record.sessionId;
+          }
+        }
+        const sessionId = resolvedSessionId ?? "unknown";
 
         // Process attachments
         if (message.attachments.size > 0) {
@@ -584,10 +591,8 @@ export class DiscordAdapter extends MessagingAdapter {
         // message draft and the previous "💭 Still thinking..." / typing indicators
         // never clear.
         if (sessionId !== "unknown") {
-          const tracker = this.sessionTrackers.get(sessionId);
-          if (tracker) {
-            await tracker.onNewPrompt();
-          }
+          await this.drainAndResetTracker(sessionId);
+
           if (message.channel.isThread()) {
             const isAssistant = this.assistantSession != null && sessionId === this.assistantSession.id;
             await this.draftManager.finalize(sessionId, message.channel as ThreadChannel, isAssistant);
@@ -805,11 +810,23 @@ export class DiscordAdapter extends MessagingAdapter {
   }
 
   /** Called from button router to switch mode and re-render the current tool card. */
-  updateSessionOutputMode(sessionId: string, mode: OutputMode): void {
+  public updateSessionOutputMode(sessionId: string, mode: OutputMode): void {
     const tracker = this.sessionTrackers.get(sessionId);
     if (!tracker) return;
     tracker.setOutputMode(mode);
     tracker.rerender();
+  }
+
+  /**
+   * Drain pending event dispatches from the previous prompt, then reset the
+   * activity tracker so late tool_call events don't leak into the new card.
+   */
+  private async drainAndResetTracker(sessionId: string): Promise<void> {
+    const pendingDispatch = this._dispatchQueues.get(sessionId);
+    if (pendingDispatch) await pendingDispatch;
+
+    const tracker = this.sessionTrackers.get(sessionId);
+    if (tracker) await tracker.onNewPrompt();
   }
 
   /**
@@ -891,22 +908,31 @@ export class DiscordAdapter extends MessagingAdapter {
 
     await ensureUnarchived(thread);
 
-    // Store thread context keyed by sessionId for concurrency safety
-    this._sessionContexts.set(sessionId, {
-      thread,
-      isAssistant: this.assistantSession != null && sessionId === this.assistantSession.id,
+    // Get current queue for this session
+    const queue = this._dispatchQueues.get(sessionId) || Promise.resolve();
+
+    // Append this message to the queue
+    const next = queue.then(async () => {
+      // Store thread context keyed by sessionId for concurrency safety
+      this._sessionContexts.set(sessionId, {
+        thread,
+        isAssistant: this.assistantSession != null && sessionId === this.assistantSession.id,
+      });
+
+      try {
+        // Resolve verbosity from discord plugin settings (and per-session override)
+        // rather than the base class's channel-config lookup, which doesn't see our
+        // plugin-settings-backed outputMode and would always fall back to "medium".
+        const verbosity = this.resolveMode(sessionId);
+        if (!this.shouldDisplay(content, verbosity)) return;
+        await this.dispatchMessage(sessionId, content, verbosity);
+      } finally {
+        this._sessionContexts.delete(sessionId);
+      }
     });
 
-    try {
-      // Resolve verbosity from discord plugin settings (and per-session override)
-      // rather than the base class's channel-config lookup, which doesn't see our
-      // plugin-settings-backed outputMode and would always fall back to "medium".
-      const verbosity = this.resolveMode(sessionId);
-      if (!this.shouldDisplay(content, verbosity)) return;
-      await this.dispatchMessage(sessionId, content, verbosity);
-    } finally {
-      this._sessionContexts.delete(sessionId);
-    }
+    this._dispatchQueues.set(sessionId, next);
+    return next;
   }
 
   // ─── Handler overrides ─────────────────────────────────────────────────────
