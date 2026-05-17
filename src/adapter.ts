@@ -73,6 +73,7 @@ export class DiscordAdapter extends MessagingAdapter {
   private skillManager!: SkillCommandManager;
   private permissionHandler!: PermissionHandler;
   private sessionTrackers: Map<string, ActivityTracker> = new Map();
+  private _syncingSessions = new Set<string>();
 
   private guild!: Guild;
   private forumChannel!: ForumChannel | TextChannel;
@@ -591,7 +592,23 @@ export class DiscordAdapter extends MessagingAdapter {
         // message draft and the previous "💭 Still thinking..." / typing indicators
         // never clear.
         if (sessionId !== "unknown") {
+          // Trigger manual resume if not live in memory.
+          // This allows us to catch and suppress replayed events during the sync phase.
+          const isLive = !!this.core.sessionManager.getSession(sessionId);
+          if (!isLive) {
+            log.debug({ sessionId, threadId }, "[DiscordAdapter] Triggering lazy resume catch-up for inactive session");
+            this._syncingSessions.add(sessionId);
+            try {
+              await this.core.getOrResumeSession("discord", threadId);
+            } catch (err) {
+              log.warn({ err, sessionId }, "[DiscordAdapter] Manual resume failed");
+            }
+          }
+
           await this.drainAndResetTracker(sessionId);
+
+          // Stop suppression after sync and tracker reset
+          this._syncingSessions.delete(sessionId);
 
           if (message.channel.isThread()) {
             const isAssistant = this.assistantSession != null && sessionId === this.assistantSession.id;
@@ -920,6 +937,15 @@ export class DiscordAdapter extends MessagingAdapter {
       });
 
       try {
+        // Suppress agent activity during lazy resume catch-up to prevent Discord thread clutter.
+        // We keep config_update (to update UI buttons) and system_message/error (for critical info).
+        if (this._syncingSessions.has(sessionId)) {
+          if (content.type !== "config_update" && content.type !== "system_message" && content.type !== "error") {
+            log.debug({ sessionId, type: content.type }, "[DiscordAdapter] Suppressing catch-up outbound message");
+            return;
+          }
+        }
+
         // Resolve verbosity from discord plugin settings (and per-session override)
         // rather than the base class's channel-config lookup, which doesn't see our
         // plugin-settings-backed outputMode and would always fall back to "medium".

@@ -56,14 +56,17 @@ describe("DiscordAdapter Resume Logic", () => {
     mockCore = {
       configManager: { get: vi.fn().mockReturnValue({}), resolveWorkspace: vi.fn().mockReturnValue("/tmp") },
       sessionManager: {
+        getSession: vi.fn(),
         getSessionByThread: vi.fn(),
         getRecordByThread: vi.fn(),
+        getSessionRecord: vi.fn(),
         listSessions: vi.fn().mockReturnValue([]),
         listRecords: vi.fn().mockReturnValue([]),
         patchRecord: vi.fn().mockResolvedValue(undefined),
       },
       fileService: {},
       eventBus: { on: vi.fn(), off: vi.fn() },
+      getOrResumeSession: vi.fn().mockResolvedValue({ id: "session-abc" }),
     };
 
     adapter = new DiscordAdapter(mockCore, config as any, undefined);
@@ -77,6 +80,7 @@ describe("DiscordAdapter Resume Logic", () => {
     
     // Simulate: No live session found for thread
     mockCore.sessionManager.getSessionByThread.mockReturnValue(undefined);
+    mockCore.sessionManager.getSession.mockReturnValue(undefined);
     // But a stored record DOES exist
     mockCore.sessionManager.getRecordByThread.mockReturnValue({
       sessionId,
@@ -115,5 +119,38 @@ describe("DiscordAdapter Resume Logic", () => {
     expect(drainSpy).toHaveBeenCalledWith(sessionId);
     
     // Success: the tracker was reset for the new prompt, isolating replayed messages.
+  });
+
+  it("suppresses outbound messages during sync phase", async () => {
+    const sessionId = "session-sync";
+    
+    // Manually add to syncingSessions (private set)
+    (adapter as any)._syncingSessions.add(sessionId);
+
+    // Mock a thread
+    const mockThread = { id: "thread-1" } as any;
+    vi.spyOn(adapter as any, "getThread").mockResolvedValue(mockThread);
+
+    // Call sendMessage with a tool_call (should be suppressed)
+    const toolCall = { type: "tool_call", text: "Read" } as any;
+    await adapter.sendMessage(sessionId, toolCall);
+    
+    // Since it's async and enqueued, we wait a bit
+    await new Promise(r => setTimeout(r, 10));
+
+    // Verify: no message enqueued for dispatch? 
+    // Actually, shouldDisplay and dispatchMessage would be skipped.
+    // We can check if dispatchMessage was called.
+    const dispatchSpy = vi.spyOn(adapter as any, "dispatchMessage");
+    
+    await adapter.sendMessage(sessionId, toolCall);
+    await new Promise(r => setTimeout(r, 10));
+    expect(dispatchSpy).not.toHaveBeenCalled();
+
+    // Now send a config_update (should NOT be suppressed)
+    const configUpdate = { type: "config_update", text: "Config" } as any;
+    await adapter.sendMessage(sessionId, configUpdate);
+    await new Promise(r => setTimeout(r, 10));
+    expect(dispatchSpy).toHaveBeenCalled();
   });
 });
